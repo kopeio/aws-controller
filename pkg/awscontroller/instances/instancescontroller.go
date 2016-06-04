@@ -46,7 +46,6 @@ type instance struct {
 }
 
 func (c *InstancesController) runLoop() {
-	// TODO: A better way to run right away?
 	go wait.Until(func() {
 		if err := c.runOnce(); err != nil {
 			runtime.HandleError(err)
@@ -144,13 +143,35 @@ func (c *InstancesController) runOnce() error {
 	}
 
 	for _, i := range c.instances {
+		id := i.ID
+
 		if i.sequence != sequence {
-			glog.Infof("Instance deleted: %q", i.ID)
-			delete(c.instances, i.ID)
+			glog.Infof("Instance deleted: %q", id)
+			delete(c.instances, id)
 			continue
 		}
 
-		if c.SourceDestCheck != nil && *c.SourceDestCheck != aws.BoolValue(i.status.SourceDestCheck) {
+		canSetSourceDestCheck := false
+		instanceStateName := aws.StringValue(i.status.State.Name)
+		switch (instanceStateName) {
+		case "pending":
+			glog.V(2).Infof("Ignoring pending instance: %q", id)
+		case "running":
+			canSetSourceDestCheck = true
+		case "shutting-down":
+		// ignore
+		case "terminated":
+		// ignore
+		case "stopping":
+			canSetSourceDestCheck = true
+		case "stopped":
+			canSetSourceDestCheck = true
+
+		default:
+			runtime.HandleError(fmt.Errorf("unknown instance state for instance %q: %q", id, instanceStateName))
+		}
+
+		if canSetSourceDestCheck && c.SourceDestCheck != nil && *c.SourceDestCheck != aws.BoolValue(i.status.SourceDestCheck) {
 			err := c.configureInstanceSourceDestCheck(i.ID, *c.SourceDestCheck)
 			if err != nil {
 				runtime.HandleError(fmt.Errorf("failed to configure SourceDestCheck for instance %q: %v", i.ID, err))
