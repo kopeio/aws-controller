@@ -29,17 +29,13 @@ import (
 	"github.com/golang/glog"
 	"github.com/spf13/pflag"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/credentials/ec2rolecreds"
-	"github.com/aws/aws-sdk-go/aws/ec2metadata"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/kopeio/aws-controller/pkg/awscontroller/instances"
+	"github.com/kopeio/aws-controller/pkg/kope"
+	"github.com/kopeio/aws-controller/pkg/kope/kopeaws"
 )
 
 const (
-	healthPort = 10249
+	healthPort = 10245
 )
 
 var (
@@ -57,7 +53,8 @@ var (
 	//kubeConfig = flags.String("kubeconfig", "", "Path to kubeconfig file with authorization information.")
 
 	//nodeName       = flags.String("node-name", "", "name of this node")
-	flagClusterID  = flags.String("cluster-id", "", "cluster id")
+	flagZoneName  = flags.String("zone-name", "", "DNS zone name to use (if managing DNS)")
+	flagClusterID = flags.String("cluster-id", "", "cluster id")
 	//systemUUIDPath = flags.String("system-uuid", "", "path to file containing system-uuid (as set in node status)")
 	//bootIDPath     = flags.String("boot-id", "", "path to file containing boot-id (as set in node status)")
 	//providerID     = flags.String("provider", "gre", "route backend to use")
@@ -70,10 +67,6 @@ var (
 	profiling = flags.Bool("profiling", true, `Enable profiling via web interface host:port/debug/pprof/`)
 )
 
-// The tag name we use to differentiate multiple logically independent clusters running in the same AZ
-const TagNameKubernetesCluster = "KubernetesCluster"
-
-
 func main() {
 	flags.AddGoFlagSet(flag.CommandLine)
 
@@ -81,29 +74,26 @@ func main() {
 
 	glog.Infof("Using build: %v - %v", gitRepo, version)
 
+	cloud, err := kopeaws.NewAWSCloud()
+	if err != nil {
+		glog.Fatalf("error building cloud: %v", err)
+	}
+
 	clusterID := *flagClusterID
+	if clusterID == "" && cloud != nil {
+		clusterID = cloud.ClusterID()
+	}
 	if clusterID == "" {
 		glog.Fatalf("cluster-id flag must be set")
 	}
 
-	tags := make(map[string]string)
-	tags[TagNameKubernetesCluster] = clusterID
+	var dns kope.DNSProvider
+	zoneName := *flagZoneName
+	if zoneName != "" {
+		dns = kopeaws.NewRoute53DNSProvider(zoneName)
+	}
 
-	creds := credentials.NewChainCredentials(
-		[]credentials.Provider{
-			&credentials.EnvProvider{},
-			&ec2rolecreds.EC2RoleProvider{
-				Client: ec2metadata.New(session.New(&aws.Config{})),
-			},
-			&credentials.SharedCredentialsProvider{},
-		})
-
-	ec2 := ec2.New(session.New(&aws.Config{
-		//Region:      &regionName,
-		Credentials: creds,
-	}))
-
-	c := instances.NewInstancesController(ec2, tags)
+	c := instances.NewInstancesController(cloud, *resyncPeriod, dns)
 
 	sourceDestCheck := false
 	c.SourceDestCheck = &sourceDestCheck

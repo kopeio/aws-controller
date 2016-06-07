@@ -5,36 +5,43 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/golang/glog"
+	"github.com/kopeio/aws-controller/pkg/kope"
+	"github.com/kopeio/aws-controller/pkg/kope/kopeaws"
 	"k8s.io/kubernetes/pkg/util/runtime"
 	"k8s.io/kubernetes/pkg/util/wait"
+	"sort"
 	"sync"
 	"time"
 )
 
 type InstancesController struct {
 	SourceDestCheck *bool
-	ec2             *ec2.EC2
-	filterTags      map[string]string
+	cloud           *kopeaws.AWSCloud
 
-	period          time.Duration
+	period time.Duration
 
-	instances       map[string]*instance
-	sequence        int
+	instances map[string]*instance
+	sequence  int
+
+	// dnsState holds the last configured DNS state
+	dns      kope.DNSProvider
+	dnsState map[string][]string
 
 	// stopLock is used to enforce only a single call to Stop is active.
 	// Needed because we allow stopping through an http endpoint and
 	// allowing concurrent stoppers leads to stack traces.
-	stopLock        sync.Mutex
-	shutdown        bool
-	stopCh          chan struct{}
+	stopLock sync.Mutex
+	shutdown bool
+	stopCh   chan struct{}
 }
 
-func NewInstancesController(ec2 *ec2.EC2, filterTags map[string]string) *InstancesController {
+func NewInstancesController(cloud *kopeaws.AWSCloud, period time.Duration, dns kope.DNSProvider) *InstancesController {
 	c := &InstancesController{
-		ec2:       ec2,
+		cloud:     cloud,
 		instances: make(map[string]*instance),
-		period:    10 * time.Second,
-		filterTags: filterTags,
+		period:    period,
+		dns:       dns,
+		dnsState:  make(map[string][]string),
 	}
 	return c
 }
@@ -78,65 +85,33 @@ func (c *InstancesController) Run() {
 	glog.Infof("shutting down route controller")
 }
 
-func newEc2Filter(name string, value string) *ec2.Filter {
-	filter := &ec2.Filter{
-		Name: aws.String(name),
-		Values: []*string{
-			aws.String(value),
-		},
-	}
-	return filter
-}
-
-
-// Add additional filters, to match on our tags
-// This lets us run multiple k8s clusters in a single EC2 AZ
-func (c *InstancesController) addFilterTags(filters []*ec2.Filter) []*ec2.Filter {
-	for k, v := range c.filterTags {
-		filters = append(filters, newEc2Filter("tag:" + k, v))
-	}
-	if len(filters) == 0 {
-		// We can't pass a zero-length Filters to AWS (it's an error)
-		// So if we end up with no filters; just return nil
-		return nil
-	}
-
-	return filters
-}
-
 func (c *InstancesController) runOnce() error {
-	request := &ec2.DescribeInstancesInput{
-		Filters: c.addFilterTags(nil),
+	instances, err := c.cloud.DescribeInstances()
+	if err != nil {
+		return err
 	}
-
-	glog.Infof("Querying EC2 instances")
 
 	c.sequence = c.sequence + 1
 	sequence := c.sequence
 
-	err := c.ec2.DescribeInstancesPages(request, func(p *ec2.DescribeInstancesOutput, lastPage bool) bool {
-		for _, r := range p.Reservations {
-			for _, awsInstance := range r.Instances {
-				id := aws.StringValue(awsInstance.InstanceId)
-				if id == "" {
-					runtime.HandleError(fmt.Errorf("skipping instance with empty instanceid: %v", awsInstance))
-					continue
-				}
-
-				i := c.instances[id]
-				if i == nil {
-					i = &instance{
-						ID: id,
-					}
-					c.instances[id] = i
-				}
-
-				i.status = awsInstance
-				i.sequence = sequence
-			}
+	for _, awsInstance := range instances {
+		id := aws.StringValue(awsInstance.InstanceId)
+		if id == "" {
+			runtime.HandleError(fmt.Errorf("skipping instance with empty instanceid: %v", awsInstance))
+			continue
 		}
-		return true
-	})
+
+		i := c.instances[id]
+		if i == nil {
+			i = &instance{
+				ID: id,
+			}
+			c.instances[id] = i
+		}
+
+		i.status = awsInstance
+		i.sequence = sequence
+	}
 
 	if err != nil {
 		return fmt.Errorf("error doing EC2 describe instances: %v", err)
@@ -153,7 +128,7 @@ func (c *InstancesController) runOnce() error {
 
 		canSetSourceDestCheck := false
 		instanceStateName := aws.StringValue(i.status.State.Name)
-		switch (instanceStateName) {
+		switch instanceStateName {
 		case "pending":
 			glog.V(2).Infof("Ignoring pending instance: %q", id)
 		case "running":
@@ -172,7 +147,7 @@ func (c *InstancesController) runOnce() error {
 		}
 
 		if canSetSourceDestCheck && c.SourceDestCheck != nil && *c.SourceDestCheck != aws.BoolValue(i.status.SourceDestCheck) {
-			err := c.configureInstanceSourceDestCheck(i.ID, *c.SourceDestCheck)
+			err := c.cloud.ConfigureInstanceSourceDestCheck(i.ID, *c.SourceDestCheck)
 			if err != nil {
 				runtime.HandleError(fmt.Errorf("failed to configure SourceDestCheck for instance %q: %v", i.ID, err))
 			} else {
@@ -193,20 +168,81 @@ func (c *InstancesController) runOnce() error {
 
 	glog.Infof("Found %d instances", len(c.instances))
 
+	if c.dns != nil {
+		err = c.configureDNS(c.instances)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
-// Sets the instance attribute "source-dest-check" to the specified value
-func (c *InstancesController) configureInstanceSourceDestCheck(instanceID string, sourceDestCheck bool) error {
-	glog.Infof("Configuring SourceDestCheck on %q to %v", instanceID, sourceDestCheck)
+func (c *InstancesController) configureDNS(instances map[string]*instance) error {
+	dnsState := make(map[string][]string)
 
-	request := &ec2.ModifyInstanceAttributeInput{}
-	request.InstanceId = aws.String(instanceID)
-	request.SourceDestCheck = &ec2.AttributeBooleanValue{Value: aws.Bool(sourceDestCheck)}
-
-	_, err := c.ec2.ModifyInstanceAttribute(request)
-	if err != nil {
-		return fmt.Errorf("error configuring source-dest-check on instance %q: %v", instanceID, err)
+	for _, i := range instances {
+		internalName, _ := kopeaws.FindTag(i.status, kopeaws.TagNameKubernetesDnsInternal)
+		if internalName != "" {
+			internalIP := aws.StringValue(i.status.PrivateIpAddress)
+			if internalIP != "" {
+				dnsState[internalName] = append(dnsState[internalName], internalIP)
+			}
+		}
+		publicName, _ := kopeaws.FindTag(i.status, kopeaws.TagNameKubernetesDnsPublic)
+		if publicName != "" {
+			publicIP := aws.StringValue(i.status.PublicIpAddress)
+			if publicIP != "" {
+				dnsState[publicName] = append(dnsState[publicName], publicIP)
+			}
+		}
 	}
+
+	var changes map[string][]string
+	if c.dnsState == nil {
+		if len(dnsState) == 0 {
+			glog.V(2).Infof("No dns configuration to apply")
+			c.dnsState = dnsState
+			return nil
+		} else {
+			changes = dnsState
+		}
+	} else {
+		changes = make(map[string][]string)
+		for k, v := range dnsState {
+			sort.Strings(v)
+			lastV := c.dnsState[k]
+			if !StringSlicesEqual(lastV, v) {
+				glog.V(2).Infof("DNS change %s: %v -> %v", k, lastV, v)
+				changes[k] = v
+			}
+		}
+
+		if len(changes) == 0 {
+			glog.V(2).Infof("DNS configuration unchanged")
+			return nil
+		}
+	}
+
+	err := c.dns.ApplyDNSChanges(changes)
+	if err != nil {
+		return fmt.Errorf("error applying DNS changes: %v", err)
+	}
+
+	glog.V(2).Infof("Applied DNS changes to %d hosts", len(changes))
+
+	c.dnsState = dnsState
 	return nil
+}
+
+func StringSlicesEqual(l, r []string) bool {
+	if len(l) != len(r) {
+		return false
+	}
+	for i, v := range l {
+		if r[i] != v {
+			return false
+		}
+	}
+	return true
 }
