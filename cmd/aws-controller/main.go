@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-	"github.com/spf13/pflag"
 
 	"github.com/kopeio/aws-controller/pkg/awscontroller/instances"
 	"github.com/kopeio/aws-controller/pkg/kope"
@@ -43,18 +42,20 @@ var (
 	version = "0.5"
 	gitRepo = "https://github.com/kopeio/aws-controller"
 
-	flags = pflag.NewFlagSet("", pflag.ExitOnError)
+	//flags = pflag.NewFlagSet("", pflag.ExitOnError)
 
-	resyncPeriod = flags.Duration("sync-period", 30*time.Second,
-		`Relist and confirm cloud resources this often.`)
+	//resyncPeriod = flags.Duration("sync-period", 30*time.Second,
+	//	`Relist and confirm cloud resources this often.`)
 
-	healthzPort = flags.Int("healthz-port", healthPort, "port for healthz endpoint.")
+	resyncPeriod = 30 * time.Second
+
+	healthzPort = flag.Int("healthz-port", healthPort, "port for healthz endpoint.")
 
 	//kubeConfig = flags.String("kubeconfig", "", "Path to kubeconfig file with authorization information.")
 
 	//nodeName       = flags.String("node-name", "", "name of this node")
-	flagZoneName  = flags.String("zone-name", "", "DNS zone name to use (if managing DNS)")
-	flagClusterID = flags.String("cluster-id", "", "cluster id")
+	flagZoneName = flag.String("zone-name", "", "DNS zone name to use (if managing DNS)")
+	flagClusterID = flag.String("cluster-id", "", "cluster id")
 	//systemUUIDPath = flags.String("system-uuid", "", "path to file containing system-uuid (as set in node status)")
 	//bootIDPath     = flags.String("boot-id", "", "path to file containing boot-id (as set in node status)")
 	//providerID     = flags.String("provider", "gre", "route backend to use")
@@ -64,13 +65,13 @@ var (
 	//	`Optional, if this controller is running in a kubernetes cluster, use the
 	//	 pod secrets for creating a Kubernetes client.`)
 
-	profiling = flags.Bool("profiling", true, `Enable profiling via web interface host:port/debug/pprof/`)
+	profiling = flag.Bool("profiling", true, `Enable profiling via web interface host:port/debug/pprof/`)
 )
 
 func main() {
-	flags.AddGoFlagSet(flag.CommandLine)
-
-	flags.Parse(os.Args)
+	//flags.AddGoFlagSet(flag.CommandLine)
+	flag.Set("logtostderr", "true")
+	flag.Parse()
 
 	glog.Infof("Using build: %v - %v", gitRepo, version)
 
@@ -93,7 +94,7 @@ func main() {
 		dns = kopeaws.NewRoute53DNSProvider(zoneName)
 	}
 
-	c := instances.NewInstancesController(cloud, *resyncPeriod, dns)
+	c := instances.NewInstancesController(cloud, resyncPeriod, dns)
 
 	sourceDestCheck := false
 	c.SourceDestCheck = &sourceDestCheck

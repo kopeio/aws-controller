@@ -18,7 +18,7 @@ build-in-docker: builder-image
 	docker run -it -v `pwd`:/src builder /onbuild.sh
 
 image: build-in-docker
-	docker build -t kope/aws-controller  -f images/aws-controller/Dockerfile .
+	docker build -t kope/aws-controller:1.3  -f images/aws-controller/Dockerfile .
 
 push: image
-	docker push kope/aws-controller:latest
+	docker push kope/aws-controller:1.3
