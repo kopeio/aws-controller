@@ -54,7 +54,7 @@ var (
 	//kubeConfig = flags.String("kubeconfig", "", "Path to kubeconfig file with authorization information.")
 
 	//nodeName       = flags.String("node-name", "", "name of this node")
-	flagZoneName = flag.String("zone-name", "", "DNS zone name to use (if managing DNS)")
+	flagZoneName  = flag.String("zone-name", "", "DNS zone name to use (if managing DNS)")
 	flagClusterID = flag.String("cluster-id", "", "cluster id")
 	//systemUUIDPath = flags.String("system-uuid", "", "path to file containing system-uuid (as set in node status)")
 	//bootIDPath     = flags.String("boot-id", "", "path to file containing boot-id (as set in node status)")

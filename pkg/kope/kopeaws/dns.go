@@ -3,6 +3,7 @@ package kopeaws
 import (
 	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/route53"
@@ -51,6 +52,30 @@ func (d *Route53DNSProvider) getZone() (*route53.HostedZone, error) {
 	if d.zone != nil {
 		return d.zone, nil
 	}
+
+	if !strings.Contains(d.zoneName, ".") {
+		// Looks like a zone ID
+		zoneID := d.zoneName
+		glog.Infof("Querying for hosted zone by id: %q", zoneID)
+
+		request := &route53.GetHostedZoneInput{
+			Id: aws.String(zoneID),
+		}
+
+		response, err := d.route53.GetHostedZone(request)
+		if err != nil {
+			if AWSErrorCode(err) == "NoSuchHostedZone" {
+				glog.Infof("Zone not found with id %q; will reattempt by name", zoneID)
+			} else {
+				return nil, fmt.Errorf("error querying for DNS HostedZones %q: %v", zoneID, err)
+			}
+		} else {
+			d.zone = response.HostedZone
+			return d.zone, nil
+		}
+	}
+
+	glog.Infof("Querying for hosted zone by name: %q", d.zoneName)
 
 	findZone := d.zoneName
 	if !strings.HasSuffix(findZone, ".") {
@@ -126,4 +151,12 @@ func (d *Route53DNSProvider) set(records map[string][]string, ttl time.Duration)
 	glog.V(2).Infof("Change id is %q", aws.StringValue(response.ChangeInfo.Id))
 
 	return nil
+}
+
+// AWSErrorCode returns the aws error code, if it is an awserr.Error, otherwise ""
+func AWSErrorCode(err error) string {
+	if awsError, ok := err.(awserr.Error); ok {
+		return awsError.Code()
+	}
+	return ""
 }
